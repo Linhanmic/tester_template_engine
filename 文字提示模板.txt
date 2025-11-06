@@ -1,0 +1,35 @@
+tset
+  tcaninit 1,0,0,500
+  tcaninit 1,0,1,500,2000
+  
+  tdiagnose_rid 0x7E0
+  tdiagnose_sid 0x7E8
+  tdiagnose_keyk 0x87654321
+  
+  // 自动导入的故障码配置
+  {% for row in 故障码 %}
+  tdiagnose_dtc {{ row[0] }},{{ row[1] }}
+  {% endfor %}
+tend
+
+{% for i in range(len(文字提示)) %}
+ttitle={{ i+1 }}、{{ 文字提示[i][1] }}
+  {% for idx, row in enumerate(电源挡位) %}
+  {{ idx+1 }} tstart = {{ row[0] }},(0x261,1.0-2.1={{ 文字提示[i][0] }}),{{ 文字提示[i][1] }}
+        {{ row[1] }}
+        tcans 26f,00 00 00 00 00 01 00 00,100,9999
+        {{ encode_signal("0x261,1.0-2.1=" ~ 文字提示[i][0]) }},100,3
+        tdelay 300
+    tend
+  {% endfor %}
+
+  {{ len(电源挡位) + 1 }} tstart = ON挡，发送文字提示报文，掉线5s,上OFF挡，再发送文字提示报文
+        tcans 12d,00 00 00 00 0c 00 00 00,100,3
+        {{ encode_signal("0x261,1.0-2.1=" ~ 文字提示[i][0]) }},100,3
+        tdelay 5000
+        tcans 12d,00 00 00 00 04 00 00 00,100,3
+        {{ encode_signal("0x261,1.0-2.1=" ~ 文字提示[i][0]) }},100,3
+        tdelay 300
+    tend
+ttitle-end
+{% endfor %}
