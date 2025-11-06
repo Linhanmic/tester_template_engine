@@ -19,40 +19,145 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("TesterTemplateEngine")
 
 class TesterSignal:
-    """CAN信号编码解码类，处理CAN报文中的信号位域"""
+    """CAN信号编码解码类,处理CAN报文中的信号位域"""
     
     @staticmethod
     def generate_can_message(signal_spec: str) -> str:
         """从信号规范生成CAN报文指令
         
         Args:
-            signal_spec: 格式为 "0x261,1.0-2.1=0x12A" 的信号规范
+            signal_spec: 格式为 "0x261,1.0-2.1=0x23A" 的信号规范
+                         采用Intel字节序，低位字节在前
+                         例如 1.0-2.1=0x23A 转换后为 3a 02 00 00 00 00 00 00
             
         Returns:
             str: 格式化的tcans命令
         """
-        # 从信号规范中提取CAN ID和值
         try:
-            # 使用简单的字符串分割来获取值
-            id_part, value_part = signal_spec.split("=")
-            can_id = id_part.split(",")[0]
+            import re
+            import logging
+            logger = logging.getLogger(__name__)
             
+            match = re.match(r"(0x[0-9A-Fa-f]+),([0-9]+)\.([0-9]+)-([0-9]+)\.([0-9]+)=(0x[0-9A-Fa-f]+)", signal_spec)
+            if not match:
+                raise ValueError(f"信号规范格式无效: {signal_spec}")
+
+            can_id, start_byte, start_bit, end_byte, end_bit, value = match.groups()
+
             # 将十六进制值转换为整数
-            value = int(value_part.strip(), 16)
+            value = int(value, 16)
             
-            # 生成CAN报文 - 简化为固定格式
-            # 假设值永远放在第一个字节，其他字节为0
-            msg_data = f"{value:02x} 01 00 00 00 00 00 00"
+            # 解析位域参数 (转换为0基索引)
+            start_byte = int(start_byte) - 1  # 转换为0基索引
+            start_bit = int(start_bit)
+            end_byte = int(end_byte) - 1      # 转换为0基索引
+            end_bit = int(end_bit)
+
+            # 计算信号长度（总位数）
+            signal_length = (end_byte - start_byte) * 8 + (end_bit - start_bit) + 1
+
+            if signal_length <= 0 or signal_length > 64:
+                raise ValueError(f"信号长度无效: {signal_length}")
+
+            # 验证值是否超出信号长度能表示的范围
+            max_value = (1 << signal_length) - 1
+            if value > max_value:
+                raise ValueError(f"值 {value} 超出信号长度 {signal_length} 位能表示的范围 (最大: {max_value})")
+
+            # 初始化8字节数据
+            msg_data = [0] * 8
+
+            # 根据Intel字节序放置信号值
+            # Intel格式：低位字节在前，位编号从LSB开始
+            current_bit_pos = start_byte * 8 + start_bit
             
-            # 如果CAN ID是十六进制格式，去掉0x前缀
+            for i in range(signal_length):
+                # 检查当前信号位是否为1
+                if value & (1 << i):
+                    # 计算在CAN数据中的字节和位位置
+                    byte_idx = current_bit_pos // 8
+                    bit_idx = current_bit_pos % 8
+                    
+                    if byte_idx >= 8:
+                        raise ValueError(f"位位置超出8字节范围: {byte_idx}")
+                    
+                    # 设置对应位为1
+                    msg_data[byte_idx] |= (1 << bit_idx)
+                
+                current_bit_pos += 1
+
+            # 转换数据为字符串格式
+            msg_data_str = " ".join(f"{byte:02X}" for byte in msg_data)
+
+            # 格式化CAN ID（去掉0x前缀）
             if can_id.startswith("0x"):
                 can_id = can_id[2:]
-                
-            return f"tcans {can_id},{msg_data}"
+
+            return f"tcans {can_id},{msg_data_str}"
+            
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
             logger.error(f"生成CAN报文出错: {e}")
             raise
+    
+    @staticmethod
+    def decode_can_message(can_id: str, data: str, signal_spec: str) -> int:
+        """从CAN报文解码信号值
+        
+        Args:
+            can_id: CAN报文ID
+            data: CAN报文数据，格式为 "XX XX XX XX XX XX XX XX"
+            signal_spec: 信号规范，格式为 "1.0-2.1"
+            
+        Returns:
+            int: 解码出的信号值
+        """
+        try:
+            import re
+            # 解析信号规范
+            match = re.match(r"([0-9]+)\.([0-9]+)-([0-9]+)\.([0-9]+)", signal_spec)
+            if not match:
+                raise ValueError(f"信号规范格式无效: {signal_spec}")
 
+            start_byte, start_bit, end_byte, end_bit = match.groups()
+            start_byte = int(start_byte) - 1  # 转换为0基索引
+            start_bit = int(start_bit)
+            end_byte = int(end_byte) - 1      # 转换为0基索引
+            end_bit = int(end_bit)
+
+            # 解析CAN数据
+            data_bytes = [int(x, 16) for x in data.split()]
+            if len(data_bytes) != 8:
+                raise ValueError(f"CAN数据长度必须为8字节: {len(data_bytes)}")
+
+            # 计算信号长度
+            signal_length = (end_byte - start_byte) * 8 + (end_bit - start_bit) + 1
+
+            # 提取信号值
+            result = 0
+            current_bit_pos = start_byte * 8 + start_bit
+            
+            for i in range(signal_length):
+                byte_idx = current_bit_pos // 8
+                bit_idx = current_bit_pos % 8
+                
+                if byte_idx >= 8:
+                    raise ValueError(f"位位置超出8字节范围: {byte_idx}")
+                
+                # 检查对应位是否为1
+                if data_bytes[byte_idx] & (1 << bit_idx):
+                    result |= (1 << i)
+                
+                current_bit_pos += 1
+
+            return result
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"解码CAN报文出错: {e}")
+            raise
 
 class TemplateEngine:
     """Tester语言模板引擎，用于解析模板并生成测试脚本"""
